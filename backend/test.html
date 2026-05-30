@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Visualiser API tester</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 24px auto; padding: 0 16px; background: #0f1115; color: #e7e9ee; }
+  h1 { margin: 0 0 16px; font-size: 20px; }
+  form { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; background: #1a1d24; padding: 12px; border-radius: 8px; }
+  input[type=file] { color: #e7e9ee; }
+  input[type=number] { width: 80px; background: #0f1115; color: #e7e9ee; border: 1px solid #333; padding: 6px; border-radius: 4px; }
+  select, button { background: #2a6df4; color: #fff; border: 0; padding: 8px 14px; border-radius: 4px; cursor: pointer; }
+  select { background: #0f1115; border: 1px solid #333; }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  label { font-size: 13px; opacity: 0.8; }
+  .stage { position: relative; display: inline-block; margin-top: 16px; max-width: 100%; }
+  .stage img { max-width: 100%; display: block; border-radius: 6px; }
+  .stage canvas { position: absolute; inset: 0; pointer-events: none; }
+  pre { background: #1a1d24; padding: 12px; border-radius: 6px; overflow: auto; font-size: 12px; }
+  .status { padding: 8px 12px; border-radius: 4px; margin-top: 12px; display: inline-block; }
+  .status.ok { background: #1b3a1b; }
+  .status.err { background: #3a1b1b; }
+  .row { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+  .col { flex: 1; min-width: 320px; }
+</style>
+</head>
+<body>
+  <h1>Visualiser API tester</h1>
+
+  <form id="f" enctype="multipart/form-data">
+    <input type="file" id="image" name="image" accept="image/*" required>
+    <label>endpoint
+      <select id="endpoint">
+        <option value="/api/detect">/api/detect</option>
+        <option value="/api/detect-alignment">/api/detect-alignment</option>
+      </select>
+    </label>
+    <label>width <input type="number" id="width" value="960"></label>
+    <label>height <input type="number" id="height" value="425"></label>
+    <button type="submit" id="submit">Detect</button>
+  </form>
+
+  <div id="status"></div>
+
+  <div class="row">
+    <div class="col">
+      <div class="stage" id="stage" hidden>
+        <img id="preview" alt="">
+        <canvas id="overlay"></canvas>
+      </div>
+    </div>
+    <div class="col">
+      <pre id="out">Pick an image and click Detect.</pre>
+    </div>
+  </div>
+
+<script>
+const API_BASE = 'http://127.0.0.1:5000';
+const f = document.getElementById('f');
+const submit = document.getElementById('submit');
+const preview = document.getElementById('preview');
+const overlay = document.getElementById('overlay');
+const stage = document.getElementById('stage');
+const out = document.getElementById('out');
+const status = document.getElementById('status');
+
+function setStatus(msg, ok) {
+  status.className = 'status ' + (ok ? 'ok' : 'err');
+  status.textContent = msg;
+}
+
+document.getElementById('image').onchange = e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  preview.onload = () => {
+    overlay.width = preview.clientWidth;
+    overlay.height = preview.clientHeight;
+    overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
+  };
+  preview.src = url;
+  stage.hidden = false;
+};
+
+f.onsubmit = async e => {
+  e.preventDefault();
+  const endpoint = document.getElementById('endpoint').value;
+  const width = +document.getElementById('width').value;
+  const height = +document.getElementById('height').value;
+
+  const fd = new FormData();
+  fd.append('image', document.getElementById('image').files[0]);
+  if (endpoint === '/api/detect') {
+    fd.append('width', width);
+    fd.append('height', height);
+  }
+
+  submit.disabled = true;
+  setStatus('Sending…', true);
+  const t0 = performance.now();
+
+  try {
+    const r = await fetch(API_BASE + endpoint, { method: 'POST', body: fd });
+    const json = await r.json();
+    const ms = Math.round(performance.now() - t0);
+
+    out.textContent = JSON.stringify(json, null, 2);
+
+    if (!r.ok) {
+      setStatus(`HTTP ${r.status} (${ms} ms)`, false);
+    } else {
+      setStatus(`OK (${ms} ms)`, true);
+      if (endpoint === '/api/detect') drawDetections(json.detections || [], width, height);
+    }
+  } catch (err) {
+    setStatus('Network error: ' + err.message, false);
+    out.textContent = String(err);
+  } finally {
+    submit.disabled = false;
+  }
+};
+
+function drawDetections(dets, srcW, srcH) {
+  const ctx = overlay.getContext('2d');
+  overlay.width = preview.clientWidth;
+  overlay.height = preview.clientHeight;
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+  // Coords come back in the resized (srcW x srcH) space — scale to the displayed image.
+  const sx = preview.clientWidth / srcW;
+  const sy = preview.clientHeight / srcH;
+
+  dets.forEach((d, i) => {
+    const pts = [[d.x1, d.y1], [d.x2, d.y2], [d.x3, d.y3], [d.x4, d.y4]];
+    ctx.strokeStyle = d.IsTilted ? '#ff7043' : '#42e695';
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.lineWidth = 2;
+
+    ctx.beginPath();
+    pts.forEach(([x, y], j) => {
+      const X = x * sx, Y = y * sy;
+      if (j === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+    });
+    ctx.closePath();
+    ctx.stroke();
+
+    pts.forEach(([x, y], j) => {
+      const X = x * sx, Y = y * sy;
+      ctx.beginPath();
+      ctx.arc(X, Y, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.fillText(`p${j+1}`, X + 6, Y - 6);
+      ctx.fillStyle = ctx.strokeStyle;
+    });
+
+    ctx.fillStyle = '#fff';
+    ctx.fillText(`#${i+1} ${d.IsTilted ? 'tilted' : 'straight'}`, pts[0][0] * sx, pts[0][1] * sy - 10);
+    ctx.fillStyle = ctx.strokeStyle;
+  });
+}
+
+window.addEventListener('resize', () => {
+  if (!preview.src) return;
+  overlay.width = preview.clientWidth;
+  overlay.height = preview.clientHeight;
+});
+</script>
+</body>
+</html>

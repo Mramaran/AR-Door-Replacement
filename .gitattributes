@@ -1,0 +1,17 @@
+# Normalize line endings for text files inside the repo
+* text=auto
+
+# Binaries — never munge line endings or attempt text diff/merge
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+
+# ---------------------------------------------------------------------------
+# Git LFS — large model weights & 3D assets.
+# Run `git lfs install` once per machine before cloning/pushing.
+# (These lines come last so they override `* text=auto` for these types.)
+# ---------------------------------------------------------------------------
+*.pt   filter=lfs diff=lfs merge=lfs -text
+*.pth  filter=lfs diff=lfs merge=lfs -text
+*.glb  filter=lfs diff=lfs merge=lfs -text

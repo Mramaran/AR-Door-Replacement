@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Visualiser stream test</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; }
+  #video, #overlay { position: absolute; inset: 0; width: 100vw; height: 100vh; }
+  #video { object-fit: contain; background: #000; }
+  #overlay { pointer-events: none; }
+  #hud { position: absolute; top: 8px; left: 8px; padding: 6px 10px; background: rgba(0,0,0,0.5); border-radius: 6px; font-size: 12px; line-height: 1.4; z-index: 5; }
+  #start { position: absolute; top: 8px; right: 8px; background: #2979ff; color: #fff; border: 0; padding: 8px 12px; border-radius: 6px; cursor: pointer; z-index: 5; }
+  #camera { position: absolute; top: 8px; right: 90px; background: rgba(0,0,0,0.65); color: #fff; border: 1px solid #444; padding: 8px 10px; border-radius: 6px; max-width: 240px; z-index: 5; }
+</style>
+</head>
+<body>
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+  <div id="hud">idle</div>
+  <select id="camera" title="Camera"><option value="">(default)</option></select>
+  <button id="start">Start</button>
+
+<script>
+  // Same-origin WS URL: derives wss:// when served over HTTPS, ws:// over HTTP.
+  // For localhost testing, this is ws://localhost:5000/ws/detect-stream.
+  const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/detect-stream";
+// Capture dimensions are set after the video's metadata loads (uses the
+// camera's native aspect ratio so server-side normalized coords map cleanly
+// onto the displayed video, regardless of phone orientation).
+let captureW = 640;
+let captureH = 480;
+const QUALITY = 0.75;
+
+const video    = document.getElementById("video");
+const overlay  = document.getElementById("overlay");
+const hud      = document.getElementById("hud");
+const start    = document.getElementById("start");
+const cameraEl = document.getElementById("camera");
+
+// Populate the camera dropdown. Labels only appear after the user has granted
+// camera access at least once, so we re-list after a permission probe.
+async function listCameras() {
+  let devices = await navigator.mediaDevices.enumerateDevices();
+  if (!devices.some(d => d.kind === "videoinput" && d.label)) {
+    // Probe to unlock labels, then immediately stop the stream.
+    try {
+      const probe = await navigator.mediaDevices.getUserMedia({ video: true });
+      probe.getTracks().forEach(t => t.stop());
+      devices = await navigator.mediaDevices.enumerateDevices();
+    } catch (e) { /* user denied; we'll still show device IDs */ }
+  }
+  cameraEl.innerHTML = "";
+  devices.filter(d => d.kind === "videoinput").forEach((d, i) => {
+    const o = document.createElement("option");
+    o.value = d.deviceId;
+    o.textContent = d.label || ("camera " + (i + 1));
+    cameraEl.appendChild(o);
+  });
+  if (!cameraEl.options.length) {
+    cameraEl.innerHTML = "<option value=''>(no cameras)</option>";
+  }
+}
+listCameras();
+navigator.mediaDevices.addEventListener("devicechange", listCameras);
+
+let cap = new OffscreenCanvas(captureW, captureH);
+let capCtx = cap.getContext("2d");
+
+function resizeCaptureToVideo() {
+  if (!video.videoWidth || !video.videoHeight) return;
+  captureW = video.videoWidth;
+  captureH = video.videoHeight;
+  cap = new OffscreenCanvas(captureW, captureH);
+  capCtx = cap.getContext("2d");
+}
+video.addEventListener("loadedmetadata", resizeCaptureToVideo);
+
+let ws = null;
+let inflight = false;
+let frames = 0;
+let lastT = performance.now();
+let fps = 0;
+
+function fitOverlay() {
+  overlay.width  = overlay.clientWidth  * devicePixelRatio;
+  overlay.height = overlay.clientHeight * devicePixelRatio;
+}
+window.addEventListener("resize", fitOverlay);
+
+function drawQuad(ctx, c, color) {
+  if (!c) return;
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  const pts = [c.topLeft, c.topRight, c.bottomRight, c.bottomLeft];
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  pts.forEach((p, i) => {
+    const X = p.x * W, Y = p.y * H;
+    if (i === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+  });
+  ctx.closePath();
+  ctx.stroke();
+  pts.forEach((p) => {
+    ctx.beginPath();
+    ctx.arc(p.x * W, p.y * H, 5, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+function draw(msg) {
+  const ctx = overlay.getContext("2d");
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  if (msg.door)   drawQuad(ctx, msg.door,   msg.door.isTilted   ? "#ff7043" : "#42e695");
+  if (msg.window) drawQuad(ctx, msg.window, msg.window.isTilted ? "#ff7043" : "#42e695");
+}
+
+async function captureFrame() {
+  if (!ws || ws.readyState !== 1 || inflight || video.readyState < 2) return;
+  capCtx.drawImage(video, 0, 0, captureW, captureH);
+  const blob = await cap.convertToBlob({ type: "image/jpeg", quality: QUALITY });
+  const buf = await blob.arrayBuffer();
+  ws.send(buf);
+  inflight = true;
+}
+
+function tickHud(inferMs) {
+  frames++;
+  const now = performance.now();
+  if (now - lastT > 1000) {
+    fps = frames / ((now - lastT) / 1000);
+    frames = 0;
+    lastT = now;
+  }
+  hud.textContent = `fps ${fps.toFixed(1)} · infer ${inferMs ?? "?"} ms`;
+}
+
+start.addEventListener("click", async () => {
+  start.disabled = true;
+  hud.textContent = "requesting camera...";
+  const chosenId = cameraEl.value;
+  const videoConstraints = chosenId
+    ? { deviceId: { exact: chosenId } }
+    : { facingMode: { ideal: "environment" } };
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
+  } catch (e) {
+    hud.textContent = "camera error: " + e.name + " — " + e.message;
+    start.disabled = false;
+    return;
+  }
+  video.srcObject = stream;
+  await video.play();
+  fitOverlay();
+  hud.textContent = "connecting...";
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => { hud.textContent = "connected"; captureFrame(); };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    inflight = false;
+    if (!msg.error) draw(msg);
+    tickHud(msg.inferMs);
+    captureFrame();
+  };
+  ws.onerror = (e) => { hud.textContent = "ws error: " + (e?.message || "unknown"); };
+  ws.onclose = (e) => {
+    hud.textContent = "ws closed: code=" + e.code + " reason=" + (e.reason || "(empty)") + " clean=" + e.wasClean + " | url=" + WS_URL;
+  };
+});
+</script>
+</body>
+</html>
