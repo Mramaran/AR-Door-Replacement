@@ -6,8 +6,15 @@ import './App.css';
 // IP, or ngrok. Override with REACT_APP_VISUALISER_WS only if pointing at a
 // different visualiser host.
 const WS_URL = (() => {
-  if (typeof process !== 'undefined' && process.env && process.env.REACT_APP_VISUALISER_WS) {
-    return process.env.REACT_APP_VISUALISER_WS;
+  // Create React App replaces `process.env.REACT_APP_VISUALISER_WS` with a
+  // string literal at build time, so reference it directly. Do NOT gate this on
+  // `typeof process !== 'undefined'`: webpack 5 / CRA 5 don't define a `process`
+  // global in the browser, so that guard is ALWAYS false at runtime and the
+  // production override (the deployed backend's wss:// URL) would silently never
+  // be read — the app would fall back to same-origin and the socket would close.
+  const fromEnv = process.env.REACT_APP_VISUALISER_WS;
+  if (fromEnv) {
+    return fromEnv;
   }
   if (typeof window !== 'undefined' && window.location) {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
